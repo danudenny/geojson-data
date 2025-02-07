@@ -4,7 +4,7 @@ import json
 import requests
 from urllib.parse import urlparse
 import geopandas as gpd
-import io
+import numpy as np
 
 def is_valid_url(url):
     try:
@@ -32,6 +32,36 @@ def geojson_to_dataframe(geojson_data):
         return properties_df
     except Exception as e:
         st.error(f"Error converting GeoJSON to DataFrame: {str(e)}")
+        return None
+
+def create_numeric_filter(df, column):
+    try:
+        # Convert to float and handle NaN values
+        values = pd.to_numeric(df[column], errors='coerce')
+        valid_values = values.dropna()
+        
+        if len(valid_values) == 0:
+            return None
+        
+        min_val = float(valid_values.min())
+        max_val = float(valid_values.max())
+        
+        # Ensure min and max are not equal to avoid slider issues
+        if min_val == max_val:
+            max_val += 1
+            
+        # Round values to 2 decimal places to avoid floating point issues
+        min_val = round(min_val, 2)
+        max_val = round(max_val, 2)
+        
+        return st.slider(
+            f"Filter {column}",
+            min_value=min_val,
+            max_value=max_val,
+            value=(min_val, max_val)
+        )
+    except Exception as e:
+        st.warning(f"Could not create numeric filter for column {column}: {str(e)}")
         return None
 
 def main():
@@ -80,33 +110,31 @@ def main():
             
             for idx, column in enumerate(df.columns):
                 with cols[idx % 3]:
-                    if df[column].dtype in ['object', 'string']:
-                        # For text columns, create a multiselect
-                        unique_values = df[column].unique()
-                        filters[column] = st.multiselect(
-                            f"Filter {column}",
-                            options=unique_values,
-                            default=[]
-                        )
-                    elif df[column].dtype in ['int64', 'float64']:
-                        # For numeric columns, create a slider
-                        min_val = float(df[column].min())
-                        max_val = float(df[column].max())
-                        filters[column] = st.slider(
-                            f"Filter {column}",
-                            min_value=min_val,
-                            max_value=max_val,
-                            value=(min_val, max_val)
-                        )
+                    # Try to convert to numeric, if fails, treat as categorical
+                    try:
+                        numeric_series = pd.to_numeric(df[column], errors='raise')
+                        numeric_filter = create_numeric_filter(df, column)
+                        if numeric_filter is not None:
+                            filters[column] = numeric_filter
+                    except:
+                        # For non-numeric columns, create a multiselect
+                        unique_values = df[column].dropna().unique()
+                        if len(unique_values) > 0:
+                            filters[column] = st.multiselect(
+                                f"Filter {column}",
+                                options=unique_values,
+                                default=[]
+                            )
             
             # Apply filters
             filtered_df = df.copy()
             for column, filter_value in filters.items():
                 if filter_value:  # If filter is set
                     if isinstance(filter_value, tuple):  # Numeric range
+                        numeric_series = pd.to_numeric(filtered_df[column], errors='coerce')
                         filtered_df = filtered_df[
-                            (filtered_df[column] >= filter_value[0]) & 
-                            (filtered_df[column] <= filter_value[1])
+                            (numeric_series >= filter_value[0]) & 
+                            (numeric_series <= filter_value[1])
                         ]
                     elif isinstance(filter_value, list):  # Multiselect
                         if filter_value:  # If any values are selected
@@ -121,6 +149,16 @@ def main():
             st.write(f"Total features: {len(df)}")
             st.write(f"Filtered features: {len(filtered_df)}")
             st.write(f"Number of properties: {len(df.columns)}")
+            
+            # Add download button for filtered data
+            if not filtered_df.empty:
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="Download filtered data as CSV",
+                    data=csv,
+                    file_name="filtered_geojson_data.csv",
+                    mime="text/csv",
+                )
 
 if __name__ == "__main__":
     main()
