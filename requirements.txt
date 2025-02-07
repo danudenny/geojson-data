@@ -2,3 +2,4 @@ streamlit
 geopandas
 pandas
 requests
+numpy
