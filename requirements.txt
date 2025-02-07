@@ -3,3 +3,4 @@ geopandas
 pandas
 requests
 numpy
+shapely
