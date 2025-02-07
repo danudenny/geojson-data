@@ -5,8 +5,7 @@ import requests
 from urllib.parse import urlparse
 import geopandas as gpd
 import numpy as np
-from shapely.geometry import shape, Polygon, MultiPolygon
-from shapely.geometry.polygon import orient
+from shapely.geometry import shape
 
 # Set page config to wide mode
 st.set_page_config(layout="wide")
@@ -26,111 +25,20 @@ def load_geojson_from_url(url):
         st.error(f"Error loading GeoJSON from URL: {str(e)}")
         return None
 
-def is_ccw(geometry):
-    """Check if a polygon is counter-clockwise (CCW)."""
-    try:
-        if isinstance(geometry, Polygon):
-            return not orient(geometry, sign=1.0).exterior.is_ccw
-        elif isinstance(geometry, MultiPolygon):
-            return any(not orient(poly, sign=1.0).exterior.is_ccw for poly in geometry.geoms)
-        return False
-    except:
-        return None
-
-def has_more_than_6_decimals(coords):
-    """Check if any coordinate has more than 6 decimal places."""
-    try:
-        for coord in coords:
-            for point in coord:
-                lon, lat = point
-                if (
-                    len(str(float(lon)).split(".")[1]) > 6
-                    or len(str(float(lat)).split(".")[1]) > 6
-                ):
-                    return True
-        return False
-    except:
-        return None
-
 def geojson_to_dataframe(geojson_data):
     try:
-        # Validate GeoJSON structure
-        if not isinstance(geojson_data, dict) or "features" not in geojson_data:
-            raise ValueError("Invalid GeoJSON format")
-            
-        # Store original GeoJSON for later use
-        st.session_state['original_geojson'] = geojson_data
-        
-        # Convert to GeoDataFrame with better error handling
-        features = []
-        for feature in geojson_data["features"]:
-            try:
-                if isinstance(feature.get("geometry"), dict):
-                    features.append(feature)
-            except (TypeError, AttributeError):
-                continue
-                
-        if not features:
-            raise ValueError("No valid features found in GeoJSON")
-            
-        gdf = gpd.GeoDataFrame.from_features(features)
+        # Convert GeoJSON to GeoDataFrame
+        gdf = gpd.GeoDataFrame.from_features(geojson_data["features"])
         
         # Extract properties as a regular DataFrame
-        properties_df = pd.DataFrame([
-            feature.get("properties", {}) 
-            for feature in features
-        ])
+        properties_df = pd.DataFrame([feature["properties"] for feature in geojson_data["features"]])
         
         # Add WKT representation of geometries
         properties_df['geometry_wkt'] = gdf.geometry.to_wkt()
         
-        # Add CCW column with error handling
-        properties_df['CCW (true/false)'] = gdf.geometry.apply(
-            lambda geom: is_ccw(geom) if geom else None
-        )
-        
-        # Add 6dec column with error handling
-        def safe_check_decimals(geom):
-            try:
-                if isinstance(geom, Polygon):
-                    return has_more_than_6_decimals([list(geom.exterior.coords)])
-                elif isinstance(geom, MultiPolygon):
-                    return has_more_than_6_decimals([list(poly.exterior.coords) for poly in geom.geoms])
-                return None
-            except:
-                return None
-                
-        properties_df['6dec (true/false)'] = gdf.geometry.apply(safe_check_decimals)
-        
         return properties_df
     except Exception as e:
         st.error(f"Error converting GeoJSON to DataFrame: {str(e)}")
-        return None
-
-def filter_geojson(original_geojson, filtered_df):
-    """Create a new GeoJSON with only the filtered features."""
-    try:
-        if not original_geojson or "features" not in original_geojson:
-            return None
-            
-        # Create a set of filtered indices based on the DataFrame
-        filtered_indices = set(filtered_df.index)
-        
-        # Filter the original features
-        filtered_features = [
-            feature for i, feature in enumerate(original_geojson["features"])
-            if i in filtered_indices
-        ]
-        
-        # Create new GeoJSON with filtered features
-        filtered_geojson = {
-            "type": "FeatureCollection",
-            "features": filtered_features
-        }
-        
-        return filtered_geojson
-    except Exception as e:
-        st.error(f"Error filtering GeoJSON: {str(e)}")
         return None
 
 def create_numeric_filter(df, column):
@@ -166,7 +74,7 @@ def create_numeric_filter(df, column):
 def create_filter_layout(df):
     # Calculate number of columns based on total number of properties
     num_properties = len(df.columns)
-    num_columns = min(5, max(3, num_properties // 4))
+    num_columns = min(5, max(3, num_properties // 4))  # Adjust number of columns based on properties
     
     filters = {}
     
@@ -190,7 +98,7 @@ def create_filter_layout(df):
                 except:
                     # For non-numeric columns, create a multiselect
                     unique_values = df[column].dropna().unique()
-                    if len(unique_values) > 0 and len(unique_values) <= 100:
+                    if len(unique_values) > 0 and len(unique_values) <= 100:  # Limit unique values to prevent UI overload
                         filters[column] = st.multiselect(
                             f"Filter {column}",
                             options=unique_values,
@@ -202,22 +110,19 @@ def create_filter_layout(df):
 def main():
     st.title("GeoJSON Checker")
     
-    # Initialize session state if needed
-    if 'original_geojson' not in st.session_state:
-        st.session_state['original_geojson'] = None
-    
     # Create two columns for input section
     col1, col2 = st.columns([1, 3])
     
     with col1:
+        # Input method selection
         input_method = st.radio(
             "Choose input method:",
             ["Upload File", "URL", "Direct Input"]
         )
     
+    geojson_data = None
+    
     with col2:
-        geojson_data = None
-        
         if input_method == "Upload File":
             uploaded_file = st.file_uploader("Upload GeoJSON file", type=["json", "geojson"])
             if uploaded_file:
@@ -279,40 +184,26 @@ def main():
                 
                 # Download options
                 if not filtered_df.empty:
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2 = st.columns(2)
                     with col1:
-                        # Download full data as CSV
+                        # Download full data
                         csv = filtered_df.to_csv(index=False)
                         st.download_button(
-                            label="Download as CSV (all columns)",
+                            label="Download all columns as CSV",
                             data=csv,
                             file_name="filtered_geojson_data_full.csv",
                             mime="text/csv",
                         )
                     with col2:
-                        # Download selected columns as CSV
+                        # Download selected columns
                         if selected_columns:
                             csv_selected = filtered_df[selected_columns].to_csv(index=False)
                             st.download_button(
-                                label="Download as CSV (selected columns)",
+                                label="Download selected columns as CSV",
                                 data=csv_selected,
                                 file_name="filtered_geojson_data_selected.csv",
                                 mime="text/csv",
                             )
-                    with col3:
-                        # Download as GeoJSON
-                        if st.session_state['original_geojson'] is not None:
-                            filtered_geojson = filter_geojson(
-                                st.session_state['original_geojson'],
-                                filtered_df
-                            )
-                            if filtered_geojson:
-                                st.download_button(
-                                    label="Download as GeoJSON",
-                                    data=json.dumps(filtered_geojson, indent=2),
-                                    file_name="filtered_data.geojson",
-                                    mime="application/json",
-                                )
             
             with tab2:
                 # Display summary statistics
