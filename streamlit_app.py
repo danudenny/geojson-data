@@ -5,6 +5,10 @@ import requests
 from urllib.parse import urlparse
 import geopandas as gpd
 import numpy as np
+from shapely.geometry import shape
+
+# Set page config to wide mode
+st.set_page_config(layout="wide")
 
 def is_valid_url(url):
     try:
@@ -28,6 +32,9 @@ def geojson_to_dataframe(geojson_data):
         
         # Extract properties as a regular DataFrame
         properties_df = pd.DataFrame([feature["properties"] for feature in geojson_data["features"]])
+        
+        # Add WKT representation of geometries
+        properties_df['geometry_wkt'] = gdf.geometry.to_wkt()
         
         return properties_df
     except Exception as e:
@@ -64,101 +71,160 @@ def create_numeric_filter(df, column):
         st.warning(f"Could not create numeric filter for column {column}: {str(e)}")
         return None
 
+def create_filter_layout(df):
+    # Calculate number of columns based on total number of properties
+    num_properties = len(df.columns)
+    num_columns = min(5, max(3, num_properties // 4))  # Adjust number of columns based on properties
+    
+    filters = {}
+    
+    # Create columns for filter layout
+    cols = st.columns(num_columns)
+    
+    # Create a container for filters with scrolling
+    with st.container():
+        for idx, column in enumerate(df.columns):
+            # Skip geometry_wkt column for filtering
+            if column == 'geometry_wkt':
+                continue
+                
+            with cols[idx % num_columns]:
+                # Try to convert to numeric, if fails, treat as categorical
+                try:
+                    numeric_series = pd.to_numeric(df[column], errors='raise')
+                    numeric_filter = create_numeric_filter(df, column)
+                    if numeric_filter is not None:
+                        filters[column] = numeric_filter
+                except:
+                    # For non-numeric columns, create a multiselect
+                    unique_values = df[column].dropna().unique()
+                    if len(unique_values) > 0 and len(unique_values) <= 100:  # Limit unique values to prevent UI overload
+                        filters[column] = st.multiselect(
+                            f"Filter {column}",
+                            options=unique_values,
+                            default=[]
+                        )
+    
+    return filters
+
 def main():
     st.title("GeoJSON Checker")
     
-    # Input method selection
-    input_method = st.radio(
-        "Choose input method:",
-        ["Upload File", "URL", "Direct Input"]
-    )
+    # Create two columns for input section
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        # Input method selection
+        input_method = st.radio(
+            "Choose input method:",
+            ["Upload File", "URL", "Direct Input"]
+        )
     
     geojson_data = None
     
-    if input_method == "Upload File":
-        uploaded_file = st.file_uploader("Upload GeoJSON file", type=["json", "geojson"])
-        if uploaded_file:
-            try:
-                geojson_data = json.load(uploaded_file)
-            except Exception as e:
-                st.error(f"Error reading file: {str(e)}")
-    
-    elif input_method == "URL":
-        url = st.text_input("Enter GeoJSON URL")
-        if url and is_valid_url(url):
-            geojson_data = load_geojson_from_url(url)
-    
-    else:  # Direct Input
-        geojson_text = st.text_area("Paste GeoJSON data")
-        if geojson_text:
-            try:
-                geojson_data = json.loads(geojson_text)
-            except Exception as e:
-                st.error(f"Error parsing GeoJSON: {str(e)}")
+    with col2:
+        if input_method == "Upload File":
+            uploaded_file = st.file_uploader("Upload GeoJSON file", type=["json", "geojson"])
+            if uploaded_file:
+                try:
+                    geojson_data = json.load(uploaded_file)
+                except Exception as e:
+                    st.error(f"Error reading file: {str(e)}")
+        
+        elif input_method == "URL":
+            url = st.text_input("Enter GeoJSON URL")
+            if url and is_valid_url(url):
+                geojson_data = load_geojson_from_url(url)
+        
+        else:  # Direct Input
+            geojson_text = st.text_area("Paste GeoJSON data", height=150)
+            if geojson_text:
+                try:
+                    geojson_data = json.loads(geojson_text)
+                except Exception as e:
+                    st.error(f"Error parsing GeoJSON: {str(e)}")
     
     if geojson_data:
         # Convert to DataFrame
         df = geojson_to_dataframe(geojson_data)
         
         if df is not None and not df.empty:
-            st.subheader("GeoJSON Properties")
+            # Create tabs for better organization
+            tab1, tab2 = st.tabs(["Data View", "Summary"])
             
-            # Add filters for each column
-            st.subheader("Filters")
-            filters = {}
-            cols = st.columns(3)
-            
-            for idx, column in enumerate(df.columns):
-                with cols[idx % 3]:
-                    # Try to convert to numeric, if fails, treat as categorical
-                    try:
-                        numeric_series = pd.to_numeric(df[column], errors='raise')
-                        numeric_filter = create_numeric_filter(df, column)
-                        if numeric_filter is not None:
-                            filters[column] = numeric_filter
-                    except:
-                        # For non-numeric columns, create a multiselect
-                        unique_values = df[column].dropna().unique()
-                        if len(unique_values) > 0:
-                            filters[column] = st.multiselect(
-                                f"Filter {column}",
-                                options=unique_values,
-                                default=[]
+            with tab1:
+                # Filters section
+                with st.expander("Filters", expanded=True):
+                    filters = create_filter_layout(df)
+                
+                # Apply filters
+                filtered_df = df.copy()
+                for column, filter_value in filters.items():
+                    if filter_value:  # If filter is set
+                        if isinstance(filter_value, tuple):  # Numeric range
+                            numeric_series = pd.to_numeric(filtered_df[column], errors='coerce')
+                            filtered_df = filtered_df[
+                                (numeric_series >= filter_value[0]) & 
+                                (numeric_series <= filter_value[1])
+                            ]
+                        elif isinstance(filter_value, list):  # Multiselect
+                            if filter_value:  # If any values are selected
+                                filtered_df = filtered_df[filtered_df[column].isin(filter_value)]
+                
+                # Column selection for display
+                selected_columns = st.multiselect(
+                    "Select columns to display",
+                    options=filtered_df.columns.tolist(),
+                    default=filtered_df.columns.tolist()
+                )
+                
+                # Display filtered DataFrame with selected columns
+                if selected_columns:
+                    st.dataframe(filtered_df[selected_columns], use_container_width=True)
+                
+                # Download options
+                if not filtered_df.empty:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        # Download full data
+                        csv = filtered_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download all columns as CSV",
+                            data=csv,
+                            file_name="filtered_geojson_data_full.csv",
+                            mime="text/csv",
+                        )
+                    with col2:
+                        # Download selected columns
+                        if selected_columns:
+                            csv_selected = filtered_df[selected_columns].to_csv(index=False)
+                            st.download_button(
+                                label="Download selected columns as CSV",
+                                data=csv_selected,
+                                file_name="filtered_geojson_data_selected.csv",
+                                mime="text/csv",
                             )
             
-            # Apply filters
-            filtered_df = df.copy()
-            for column, filter_value in filters.items():
-                if filter_value:  # If filter is set
-                    if isinstance(filter_value, tuple):  # Numeric range
-                        numeric_series = pd.to_numeric(filtered_df[column], errors='coerce')
-                        filtered_df = filtered_df[
-                            (numeric_series >= filter_value[0]) & 
-                            (numeric_series <= filter_value[1])
-                        ]
-                    elif isinstance(filter_value, list):  # Multiselect
-                        if filter_value:  # If any values are selected
-                            filtered_df = filtered_df[filtered_df[column].isin(filter_value)]
-            
-            # Display filtered DataFrame
-            st.subheader("Data Table")
-            st.dataframe(filtered_df)
-            
-            # Display summary statistics
-            st.subheader("Summary Statistics")
-            st.write(f"Total features: {len(df)}")
-            st.write(f"Filtered features: {len(filtered_df)}")
-            st.write(f"Number of properties: {len(df.columns)}")
-            
-            # Add download button for filtered data
-            if not filtered_df.empty:
-                csv = filtered_df.to_csv(index=False)
-                st.download_button(
-                    label="Download filtered data as CSV",
-                    data=csv,
-                    file_name="filtered_geojson_data.csv",
-                    mime="text/csv",
-                )
+            with tab2:
+                # Display summary statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Features", len(df))
+                with col2:
+                    st.metric("Filtered Features", len(filtered_df))
+                with col3:
+                    st.metric("Number of Properties", len(df.columns))
+                
+                # Add more detailed statistics
+                if len(df.columns) > 0:
+                    st.subheader("Column Statistics")
+                    stats_df = pd.DataFrame({
+                        'Column': df.columns,
+                        'Type': df.dtypes.astype(str),
+                        'Unique Values': df.nunique(),
+                        'Missing Values': df.isnull().sum()
+                    })
+                    st.dataframe(stats_df, use_container_width=True)
 
 if __name__ == "__main__":
     main()
