@@ -5,7 +5,8 @@ import requests
 from urllib.parse import urlparse
 import geopandas as gpd
 import numpy as np
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon, MultiPolygon
+from shapely.geometry.polygon import orient
 
 # Set page config to wide mode
 st.set_page_config(layout="wide")
@@ -25,6 +26,26 @@ def load_geojson_from_url(url):
         st.error(f"Error loading GeoJSON from URL: {str(e)}")
         return None
 
+def is_ccw(geometry):
+    """Check if a polygon is counter-clockwise (CCW)."""
+    if isinstance(geometry, Polygon):
+        return not orient(geometry, sign=1.0).exterior.is_ccw
+    elif isinstance(geometry, MultiPolygon):
+        return any(not orient(poly, sign=1.0).exterior.is_ccw for poly in geometry.geoms)
+    return False
+
+def has_more_than_6_decimals(coords):
+    """Check if any coordinate has more than 6 decimal places."""
+    for coord in coords:
+        for point in coord:
+            lon, lat = point
+            if (
+                len(str(lon).split(".")[1]) > 6
+                or len(str(lat).split(".")[1]) > 6
+            ):
+                return True
+    return False
+
 def geojson_to_dataframe(geojson_data):
     try:
         # Convert GeoJSON to GeoDataFrame
@@ -35,6 +56,18 @@ def geojson_to_dataframe(geojson_data):
         
         # Add WKT representation of geometries
         properties_df['geometry_wkt'] = gdf.geometry.to_wkt()
+        
+        # Add CCW column
+        properties_df['CCW (true/false)'] = gdf.geometry.apply(is_ccw)
+        
+        # Add 6dec column
+        properties_df['6dec (true/false)'] = gdf.geometry.apply(
+            lambda geom: has_more_than_6_decimals(
+                geom.exterior.coords if isinstance(geom, Polygon)
+                else [part.exterior.coords for part in geom.geoms] if isinstance(geom, MultiPolygon)
+                else []
+            )
+        )
         
         return properties_df
     except Exception as e:
